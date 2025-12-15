@@ -1,0 +1,32 @@
+# Build directories
+build/
+firmware/build/
+
+# Pico SDK / tooling (add as submodules or install separately)
+firmware/pico-sdk/
+firmware/picotool/
+firmware/pioasm/
+firmware/pioasm-install/
+
+# Common CMake outputs
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# Compiled binaries and objects
+*.o
+*.so
+*.a
+*.uf2
+*.elf
+
+# Editor / IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Personal helper scripts (not intended for distribution)
+build.sh
+build-pico.sh
+copy-pico.sh

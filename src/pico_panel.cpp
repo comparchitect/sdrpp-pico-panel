@@ -532,7 +532,10 @@ void PicoPanelModule::goHomeChannel() {
         double freq = presetCopy.frequency > 0 ? presetCopy.frequency
                                                : static_cast<double>(kHomeFrequencyHz);
         tuner::tune(currentTuningMode(), vfo, freq);
-        int mode = presetCopy.mode > 0 ? presetCopy.mode : dsdDemodId;
+        int mode = presetCopy.mode;
+        if (mode < 0) {
+            mode = dsdDemodId;
+        }
         core::modComManager.callInterface(vfo, RADIO_IFACE_CMD_SET_MODE, &mode, nullptr);
         float bandwidth = static_cast<float>(presetCopy.bandwidth);
         if (bandwidth > 0.0f) {
@@ -603,7 +606,7 @@ uint8_t PicoPanelModule::computeLedMask() {
         std::lock_guard<std::mutex> lock(homePresetMutex);
         presetCopy = homePreset;
     }
-    if (presetCopy.frequency > 0.0 && presetCopy.mode > 0 && demod == presetCopy.mode) {
+    if (presetCopy.frequency > 0.0 && presetCopy.mode >= 0 && demod == presetCopy.mode) {
         uint64_t freq = static_cast<uint64_t>(gui::freqSelect.frequency + 0.5);
         uint64_t target = static_cast<uint64_t>(presetCopy.frequency + 0.5);
         if (freq == target) {

@@ -38,6 +38,8 @@ constexpr uint kOledLogicalHeight =
 constexpr uint kOledTextAreaWidth = kOledLogicalWidth;
 constexpr uint kOledTextColOffset = (kOledLogicalWidth - kOledTextAreaWidth) / 2;
 constexpr uint kOledTextBaseRow = 0;
+constexpr uint kOledInitDelayMs = 100;
+constexpr uint kOledRetryIntervalMs = 500;
 constexpr const char kOledBootBanner[] = "SDR  Pico Panel";
 
 struct PotChannel {
@@ -95,6 +97,7 @@ absolute_time_t g_nextHostPoll;
 uint8_t g_ledMask = 0;
 std::array<uint8_t, kOledWidth * (kOledHeight / 8)> g_oledBuffer{};
 bool g_oledInitialized = false;
+absolute_time_t g_nextOledRetry;
 
 std::string g_hostRxBuffer;
 
@@ -250,21 +253,28 @@ void setLogicalPixel(uint x, uint y, bool on) {
     setPhysicalPixel(physX, physY, on);
 }
 
-void oledSendCommand(uint8_t cmd) {
+bool oledSendCommand(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
-    i2c_write_blocking(i2c0, kOledAddress, buf, 2, false);
+    int written = i2c_write_blocking(i2c0, kOledAddress, buf, 2, false);
+    return written == 2;
 }
 
-void oledFlush() {
+bool oledFlush() {
     for (int page = 0; page < (kOledHeight / 8); ++page) {
-        oledSendCommand(0xB0 + page);
-        oledSendCommand(0x00 | (kOledColOffset & 0x0F));
-        oledSendCommand(0x10 | (kOledColOffset >> 4));
+        if (!oledSendCommand(0xB0 + page)) { return false; }
+        if (!oledSendCommand(0x00 | (kOledColOffset & 0x0F))) { return false; }
+        if (!oledSendCommand(0x10 | (kOledColOffset >> 4))) { return false; }
         uint8_t buf[1 + kOledWidth];
         buf[0] = 0x40;
         memcpy(buf + 1, &g_oledBuffer[page * kOledWidth], kOledWidth);
-        i2c_write_blocking(i2c0, kOledAddress, buf, sizeof(buf), false);
+        int written = i2c_write_blocking(i2c0, kOledAddress, buf, sizeof(buf), false);
+        if (written != static_cast<int>(sizeof(buf))) { return false; }
     }
+    return true;
+}
+
+void scheduleOledRetry() {
+    g_nextOledRetry = make_timeout_time_ms(kOledRetryIntervalMs);
 }
 
 void oledClearBuffer() {
@@ -358,12 +368,13 @@ std::vector<std::string> wrapTextForOled(const std::string& text, size_t maxChar
     return lines;
 }
 
-void oledInit() {
+bool oledInit() {
     i2c_init(i2c0, 400000);
     gpio_set_function(kI2CPortSda, GPIO_FUNC_I2C);
     gpio_set_function(kI2CPortScl, GPIO_FUNC_I2C);
     gpio_pull_up(kI2CPortSda);
     gpio_pull_up(kI2CPortScl);
+    sleep_ms(kOledInitDelayMs);
 
     const uint8_t initSeq[] = {
         0xAE, 0x02, 0x10, 0x40, 0xB0, 0x81, 0xFF, 0xA1,
@@ -371,11 +382,18 @@ void oledInit() {
         0xD9, 0xF1, 0xDA, 0x12, 0xDB, 0x40, 0x8D, 0x14, 0xAF,
     };
     for (uint8_t cmd : initSeq) {
-        oledSendCommand(cmd);
+        if (!oledSendCommand(cmd)) {
+            g_oledInitialized = false;
+            return false;
+        }
     }
     oledClearBuffer();
-    oledFlush();
+    if (!oledFlush()) {
+        g_oledInitialized = false;
+        return false;
+    }
     g_oledInitialized = true;
+    return true;
 }
 
 void updateOledText(const std::string& text) {
@@ -396,7 +414,10 @@ void updateOledText(const std::string& text) {
         oledDrawTextLine(startRow + i, lines[i], kOledTextColOffset,
                          kOledTextAreaWidth);
     }
-    oledFlush();
+    if (!oledFlush()) {
+        g_oledInitialized = false;
+        scheduleOledRetry();
+    }
 }
 
 // --- Host command parsing --------------------------------------------------
@@ -495,8 +516,12 @@ void pollSwitches(std::array<SwitchInput, std::size(kSwitches)>& switches) {
 int main() {
     stdio_init_all();
     initLeds();
-    oledInit();
-    updateOledText(kOledBootBanner);
+    g_nextOledRetry = make_timeout_time_ms(0);
+    if (oledInit()) {
+        updateOledText(kOledBootBanner);
+    } else {
+        scheduleOledRetry();
+    }
 
     std::array<PotChannel, std::size(kPots)> pots{};
     for (size_t i = 0; i < pots.size(); ++i) { pots[i] = kPots[i]; }
@@ -514,6 +539,13 @@ int main() {
         samplePots(pots);
         pollEncoders(encoders);
         pollSwitches(switches);
+        if (!g_oledInitialized && time_reached(g_nextOledRetry)) {
+            if (oledInit()) {
+                updateOledText(kOledBootBanner);
+            } else {
+                scheduleOledRetry();
+            }
+        }
         if (time_reached(g_nextHostPoll)) {
             pollHost();
             g_nextHostPoll = make_timeout_time_ms(kHostPollIntervalMs);

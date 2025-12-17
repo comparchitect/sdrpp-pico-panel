@@ -287,7 +287,15 @@ void PicoPanelModule::ioLoop() {
             continue;
         }
 
-        if (bytes == 0 || (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+        if (bytes == 0) {
+            std::cerr << "[pico_panel] Pico disconnected (EOF), retrying..." << std::endl;
+            closeSerial();
+            connected.store(false);
+            std::this_thread::sleep_for(kReconnectDelay);
+            continue;
+        }
+
+        if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             std::this_thread::sleep_for(kIdleDelay);
             continue;
         }

@@ -16,6 +16,9 @@
 #include <radio_interface.h>
 #include <signal_path/signal_path.h>
 #include <iomanip>
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
 #include <sstream>
 #include <termios.h>
 #include <thread>
@@ -48,6 +51,49 @@ float smoothValue(std::atomic<float>& slot, float target) {
     float smoothed = previous + kSmoothingAlpha * (target - previous);
     slot.store(smoothed);
     return smoothed;
+}
+
+using ZoomControlFn = void (*)(float);
+
+ZoomControlFn resolveZoomControlFn() {
+    static std::once_flag once;
+    static ZoomControlFn fn = nullptr;
+    std::call_once(once, []() {
+#if !defined(_WIN32)
+        void* sym = dlsym(RTLD_DEFAULT, "sdrpp_set_zoom_control");
+        if (sym) {
+            fn = reinterpret_cast<ZoomControlFn>(sym);
+        }
+#endif
+    });
+    return fn;
+}
+
+void ApplyZoomCompat(float value) {
+    if (auto* fn = resolveZoomControlFn()) {
+        try {
+            (*fn)(value);
+            return;
+        } catch (...) {
+            std::cerr << "[pico_panel] setZoomControl threw, falling back\n";
+        }
+    }
+    core::configManager.acquire();
+    core::configManager.conf["zoomBw"] = value;
+    core::configManager.release(true);
+
+    double factor = static_cast<double>(value) * static_cast<double>(value);
+    double wfBw = gui::waterfall.getBandwidth();
+    double delta = wfBw - 1000.0;
+    double finalBw = std::min(1000.0 + (factor * delta), wfBw);
+    gui::waterfall.setViewBandwidth(finalBw * gui::waterfall.getUsableSpectrumRatio());
+
+    if (!gui::waterfall.selectedVFO.empty()) {
+        auto* vfo = gui::waterfall.vfos[gui::waterfall.selectedVFO];
+        if (vfo) {
+            gui::waterfall.setViewOffset(vfo->centerOffset);
+        }
+    }
 }
 
 }  // namespace
@@ -371,33 +417,19 @@ void PicoPanelModule::applyVolume(float normalized) {
 }
 
 void PicoPanelModule::applyZoom(float normalized) {
-    float slider = std::clamp(normalized, 0.0f, 1.0f);
-    float smoothed = smoothValue(lastZoom, slider);
+    float raw = std::clamp(normalized, 0.0f, 1.0f);
+    float smoothed = smoothValue(lastZoom, raw);
+    float zoomValue = 1.0f - smoothed;
 
     static std::atomic<float> lastApplied{0.0f};
     float prev = lastApplied.load();
-    if (std::fabs(smoothed - prev) < kChangeDeadband) {
+    if (std::fabs(zoomValue - prev) < kChangeDeadband) {
         return;
     }
-    lastApplied.store(smoothed);
+    lastApplied.store(zoomValue);
 
-    gui::mainWindow.addMainThreadTask([smoothed]() {
-        core::configManager.acquire();
-        core::configManager.conf["zoomBw"] = smoothed;
-        core::configManager.release(true);
-
-        double factor = static_cast<double>(smoothed) * static_cast<double>(smoothed);
-        double wfBw = gui::waterfall.getBandwidth();
-        double delta = wfBw - 1000.0;
-        double finalBw = std::min(1000.0 + (factor * delta), wfBw);
-        gui::waterfall.setViewBandwidth(finalBw * gui::waterfall.getUsableSpectrumRatio());
-
-        if (!gui::waterfall.selectedVFO.empty()) {
-            auto* vfo = gui::waterfall.vfos[gui::waterfall.selectedVFO];
-            if (vfo) {
-                gui::waterfall.setViewOffset(vfo->centerOffset);
-            }
-        }
+    gui::mainWindow.addMainThreadTask([zoomValue]() {
+        ApplyZoomCompat(zoomValue);
     });
 }
 

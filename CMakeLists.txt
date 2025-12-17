@@ -28,3 +28,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${SDRPP_SOURCE_ROOT}/decoder_modules"
     "${SDRPP_SOURCE_ROOT}/decoder_modules/radio/src"
 )
+
+if (UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE dl)
+endif()
